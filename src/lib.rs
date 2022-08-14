@@ -21,14 +21,14 @@ impl From<&stl_io::IndexedMesh> for Mesh {
                     .vertices
                     .iter()
                     .copied()
-                    .map(|v| vertex_from_stl(v))
+                    .map(vertex_from_stl)
                     .collect()
             },
             triangles: {
                 mesh
                     .faces
                     .iter()
-                    .map(|t| triangle_from_stl(t))
+                    .map(triangle_from_stl)
                     .collect()
             },
         }

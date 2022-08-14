@@ -7,13 +7,11 @@ use pylon_engine::{
     CameraTransformsUniform,
     Material,
     Matrix,
-    MeshTriangle,
-    MeshVertex,
     ObjectTransformsUniform,
     Point,
     Renderer,
 };
-use pylon_mesh::Mesh;
+use pylon_engine_mesh::Mesh;
 use wgpu::BufferAddress;
 use wgpu_allocators::{Allocator as _, HeapUsages, NonZeroBufferAddress};
 use winit::{
@@ -27,7 +25,16 @@ const WINDOW_LENGTH: u32 = 512;
 
 /// Runs the cube demo.
 fn main() {
-    let mesh = load_mesh_from_env();
+    let mesh = match load_mesh_from_env() {
+        Ok(Some(mesh)) => mesh,
+        Ok(None) => {
+            return;
+        }
+        Err(e) => {
+            println!("error: {}", e);
+            return;
+        }
+    };
 
     let event_loop = EventLoop::new();
     let window = create_window(&event_loop);
@@ -64,13 +71,26 @@ fn main() {
     gfx.queue().submit(Some(command_encoder.finish()));
 
     let mut tick_count: f32 = 0.;
+    let mut mouse_position = Point::ORIGIN;
 
     event_loop.run(move |event, _, ctrl_flow| {
         *ctrl_flow = ControlFlow::Poll;
 
         match event {
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-                *ctrl_flow = ControlFlow::Exit;
+            Event::WindowEvent { event, .. } => {
+                match event {
+                    WindowEvent::CursorMoved { position, .. } => {
+                        let [x, y] = [position.x, position.y].map(|coord| {
+                            (((coord / (WINDOW_LENGTH as f64)) * 2.0) - 1.0) as f32
+                        });
+                        mouse_position.x = x;
+                        mouse_position.y = y;
+                    }
+                    WindowEvent::CloseRequested => {
+                        *ctrl_flow = ControlFlow::Exit;
+                    }
+                    _ => {}
+                }
             }
             Event::MainEventsCleared => {
                 window.request_redraw();
@@ -78,13 +98,23 @@ fn main() {
             Event::RedrawRequested(_) => {
                 let tn = &mut object.transforms_node;
 
-                // Update cube rotation.
+                // Update cube position.
                 {
-                    let rotation_angle = tick_count / 10_000.0;
-                    let rotation = tn.rotation_mut();
-                    rotation.x = rotation_angle;
-                    rotation.y = rotation_angle;
+                    let orbit_angle = tick_count / 100.0;
+                    let position = tn.position_mut();
+                    position.x = mouse_position.x + (orbit_angle.cos() / 10.0);
+                    position.y = mouse_position.y + (orbit_angle.sin() / 10.0);
                 }
+
+                // Update cube rotation.
+                // {
+                //     let rotation_angle = tick_count / 10_000.0;
+                //     let rotation = tn.rotation_mut();
+                //     rotation.x = rotation_angle;
+                //     rotation.y = rotation_angle;
+                // }
+
+                *tn.scale_mut() = (tick_count / 10.0).sin();
 
                 tn.invalidate_cache();
 
@@ -127,27 +157,39 @@ fn main() {
     });
 }
 
-fn load_mesh_from_env() -> Result<Option<pylon_mesh::Mesh>, ()> {
+fn load_mesh_from_env() -> Result<Option<Mesh>, String> {
     use std::{ffi::OsStr, path::Path};
 
     let Some(file_path) = std::env::args().nth(1) else {
         println!("usage: load_mesh_from_file <mesh-file>");
-        std::process::exit(0);
+        return Ok(None);
     };
     let file_path = Path::new(&file_path);
 
     let Some(file_ext) = file_path.extension() else {
-        println!("error: cannot determine file type; no file extension");
-        std::process::exit(1);
-    }
+        return Err("cannot determine file type; no file extension".into());
+    };
 
-    if file_ext == OsStr::new("stl") {
-        stl_io::read_stl(read)
-    } else {
-        println!("error: unknown file type");
+    load_mesh_from_file(
+        file_path,
+        if file_ext == OsStr::new("stl") {
+            |mut file| {
+                stl_io::read_stl(&mut file)
+                    .map_err(|e| e.to_string())
+                    .map(|ref mesh| mesh.into())
+            }
+        } else {
+            return Err("unknown file type".into());
+        },
+    )
+    .map(Some)
+}
 
-        Err(())
-    }
+fn load_mesh_from_file(
+    path: &std::path::Path,
+    parse: impl FnOnce(std::fs::File) -> Result<Mesh, String>,
+) -> Result<Mesh, String> {
+    std::fs::File::open(path).map_err(|e| e.to_string()).and_then(parse)
 }
 
 fn create_window(event_loop: &EventLoop<()>) -> Window {
@@ -202,7 +244,7 @@ fn create_camera(
     uniform_heap.write_and_flush(
         command_encoder,
         transformation_matrix_range,
-        bytemuck::bytes_of(&camera.transformation_matrix().to_array()),
+        bytemuck::bytes_of(&Matrix::IDENTITY.to_array()),
     );
 
     camera
@@ -218,12 +260,6 @@ impl pylon_engine::Camera for Camera {
     }
 }
 
-impl Camera {
-    fn transformation_matrix(&self) -> Matrix {
-        Matrix::IDENTITY
-    }
-}
-
 fn create_object(
     gfx: &Renderer,
     command_encoder: &mut wgpu::CommandEncoder,
@@ -233,8 +269,8 @@ fn create_object(
 ) -> Cube {
     let index_and_vertex_heap = wgpu_allocators::Heap::new(
         gfx.device(),
-        // SAFETY: 512 is nonzero.
-        unsafe { NonZeroBufferAddress::new_unchecked(512) },
+        // SAFETY: 4 MiB is nonzero.
+        unsafe { NonZeroBufferAddress::new_unchecked(4 * 1024 * 1024) },
         HeapUsages::INDEX | HeapUsages::VERTEX,
     );
     let mut index_and_vertex_stack = wgpu_allocators::Stack::new(&index_and_vertex_heap);
@@ -289,14 +325,7 @@ fn create_object(
         render_pipeline: gfx.create_pipeline(wgpu::ShaderSource::Wgsl(
             std::borrow::Cow::Borrowed(r#"
                 @fragment
-                fn main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-                    return vec4<f32>(
-                        position.x / 512.0,
-                        position.y / 1024.0,
-                        position.z * 2.0,
-                        1.0,
-                    );
-                }
+                fn main() -> @location(0) vec4<f32> { return vec4<f32>(1., 1., 1., 1.); }
             "#)
         )),
         transforms_node: pylon_engine::tree::Node::default(),
