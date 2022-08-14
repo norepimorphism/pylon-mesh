@@ -1,0 +1,16 @@
+[package]
+name = "pylon-engine-mesh"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dae-parser = "0.8"
+pylon-engine = { git = "https://github.com/norepimorphism/pylon" }
+stl_io = "0.6"
+
+[dev-dependencies]
+bytemuck = "1.12"
+pollster = "0.2"
+wgpu = "0.13"
+wgpu-allocators = { git = "https://github.com/norepimorphism/wgpu-allocators" }
+winit = "0.27"
